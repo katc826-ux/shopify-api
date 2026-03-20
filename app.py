@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 import requests
 import time
 from datetime import datetime, timedelta, timezone
+import re
 
 app = Flask(__name__)
 
@@ -17,33 +18,35 @@ _token_cache = {
     "expires_at": 0
 }
 
+# 🔥 NEW: normalize function
+def normalize_text(text):
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)   # remove punctuation
+    text = re.sub(r'\s+', ' ', text).strip()   # fix spacing
+    return text
+
 
 def get_access_token():
-    """
-    Fetch and cache the Shopify Admin API access token using
-    the Dev Dashboard client credentials flow.
-    """
     now = time.time()
 
-    # Refresh 60 seconds before expiry
     if _token_cache["access_token"] and now < _token_cache["expires_at"] - 60:
         return _token_cache["access_token"]
 
     token_url = f"https://{SHOP_DOMAIN}/admin/oauth/access_token"
 
     resp = requests.post(
-    token_url,
-    headers={
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-    },
-    data={
-        "grant_type": "client_credentials",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-    },
-    timeout=20,
-)
+        token_url,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        data={
+            "grant_type": "client_credentials",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+        },
+        timeout=20,
+    )
 
     if not resp.ok:
         raise Exception(f"Token request failed: {resp.status_code} {resp.text}")
@@ -101,7 +104,7 @@ def get_inventory():
 
     query = """
     query GetInventory($search: String!) {
-      products(first: 10, query: $search) {
+      products(first: 20, query: $search) {
         edges {
           node {
             id
@@ -124,38 +127,59 @@ def get_inventory():
     }
     """
 
-    # Shopify product search is case-insensitive search/filter capable
-    data = shopify_graphql(query, {"search": product_name})
+    # 🔥 normalize input before search
+    search_term = normalize_text(product_name)
 
+    data = shopify_graphql(query, {"search": search_term})
     products = data["products"]["edges"]
 
     if not products:
         return jsonify({"error": "Product not found"}), 404
 
-    # Best-effort match
+    best_match = None
+    best_score = -1
+
     for product_edge in products:
         product = product_edge["node"]
-        if product_name.lower() in product["title"].lower():
-            variants = product["variants"]["edges"]
+        title = product["title"]
 
-            return jsonify({
-                "title": product["title"],
-                "variants": [
-                    {
-                        "variant_name": v["node"]["displayName"],
-                        "inventory": v["node"]["inventoryQuantity"],
-                        "inventory_item_id": v["node"]["inventoryItem"]["id"]
-                    }
-                    for v in variants
-                ]
-            })
+        normalized_title = normalize_text(title)
 
-    return jsonify({"error": "Product not found"}), 404
+        # 🔥 scoring logic
+        score = 0
+        if search_term == normalized_title:
+            score = 100
+        elif search_term in normalized_title:
+            score = 80
+        else:
+            query_words = set(search_term.split())
+            title_words = set(normalized_title.split())
+            score = len(query_words & title_words)
+
+        if score > best_score:
+            best_score = score
+            best_match = product
+
+    if not best_match or best_score <= 0:
+        return jsonify({"error": "Product not found"}), 404
+
+    variants = best_match["variants"]["edges"]
+
+    return jsonify({
+        "title": best_match["title"],
+        "variants": [
+            {
+                "variant_name": v["node"]["displayName"],
+                "inventory": v["node"]["inventoryQuantity"],
+                "inventory_item_id": v["node"]["inventoryItem"]["id"]
+            }
+            for v in variants
+        ]
+    })
 
 
 @app.route("/top_selling", methods=["GET"])
 def top_selling():
-    # Shopify Order object only exposes last 60 days by default unless you have extra access
     since = datetime.now(timezone.utc) - timedelta(days=7)
     since_str = since.strftime("%Y-%m-%d")
 
@@ -180,7 +204,6 @@ def top_selling():
     }
     """
 
-    # Search orders from the last 7 days
     search_query = f"created_at:>={since_str}"
 
     data = shopify_graphql(query, {"search": search_query})

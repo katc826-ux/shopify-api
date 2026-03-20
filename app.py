@@ -104,12 +104,12 @@ def get_inventory():
 
     query = """
     query GetInventory($search: String!) {
-      products(first: 20, query: $search) {
+      products(first: 50, query: $search) {
         edges {
           node {
             id
             title
-            variants(first: 20) {
+            variants(first: 50) {
               edges {
                 node {
                   id
@@ -127,54 +127,42 @@ def get_inventory():
     }
     """
 
-    # 🔥 normalize input before search
     search_term = normalize_text(product_name)
-
     data = shopify_graphql(query, {"search": search_term})
     products = data["products"]["edges"]
 
     if not products:
         return jsonify({"error": "Product not found"}), 404
 
-    best_match = None
-    best_score = -1
+    matched_products = []
 
     for product_edge in products:
         product = product_edge["node"]
-        title = product["title"]
+        normalized_title = normalize_text(product["title"])
 
-        normalized_title = normalize_text(title)
+        # match if query is contained in title, or enough words overlap
+        query_words = set(search_term.split())
+        title_words = set(normalized_title.split())
 
-        # 🔥 scoring logic
-        score = 0
-        if search_term == normalized_title:
-            score = 100
-        elif search_term in normalized_title:
-            score = 80
-        else:
-            query_words = set(search_term.split())
-            title_words = set(normalized_title.split())
-            score = len(query_words & title_words)
+        if search_term in normalized_title or len(query_words & title_words) > 0:
+            matched_products.append({
+                "title": product["title"],
+                "variants": [
+                    {
+                        "variant_name": v["node"]["displayName"],
+                        "inventory": v["node"]["inventoryQuantity"],
+                        "inventory_item_id": v["node"]["inventoryItem"]["id"]
+                    }
+                    for v in product["variants"]["edges"]
+                ]
+            })
 
-        if score > best_score:
-            best_score = score
-            best_match = product
-
-    if not best_match or best_score <= 0:
+    if not matched_products:
         return jsonify({"error": "Product not found"}), 404
 
-    variants = best_match["variants"]["edges"]
-
     return jsonify({
-        "title": best_match["title"],
-        "variants": [
-            {
-                "variant_name": v["node"]["displayName"],
-                "inventory": v["node"]["inventoryQuantity"],
-                "inventory_item_id": v["node"]["inventoryItem"]["id"]
-            }
-            for v in variants
-        ]
+        "search_term": product_name,
+        "matches": matched_products
     })
 
 

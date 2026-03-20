@@ -1,12 +1,10 @@
+import os
 from flask import Flask, request, jsonify
 import requests
 import time
 from datetime import datetime, timedelta, timezone
-import os 
 
 app = Flask(__name__)
-
-import os
 
 CLIENT_ID = os.environ.get("CLIENT_ID")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
@@ -34,17 +32,18 @@ def get_access_token():
     token_url = f"https://{SHOP_DOMAIN}/admin/oauth/access_token"
 
     resp = requests.post(
-        token_url,
-        headers={
-            "Content-Type": "application/json",
-        },
-        data={
-            "grant_type": "client_credentials",
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-        },
-        timeout=20,
-    )
+    token_url,
+    headers={
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+    },
+    data={
+        "grant_type": "client_credentials",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+    },
+    timeout=20,
+)
 
     if not resp.ok:
         raise Exception(f"Token request failed: {resp.status_code} {resp.text}")
@@ -203,5 +202,5 @@ def top_selling():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False)

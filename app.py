@@ -13,16 +13,19 @@ SHOP_DOMAIN = os.environ.get("SHOP_DOMAIN")
 
 API_VERSION = "2026-01"
 
+# Put your main Shopify location ID here after you fetch it once from /locations
+DEFAULT_LOCATION_ID = os.environ.get("DEFAULT_LOCATION_ID")
+
 _token_cache = {
     "access_token": None,
     "expires_at": 0
 }
 
-# 🔥 NEW: normalize function
+
 def normalize_text(text):
     text = text.lower()
-    text = re.sub(r'[^a-z0-9\s]', ' ', text)   # remove punctuation
-    text = re.sub(r'\s+', ' ', text).strip()   # fix spacing
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 
@@ -90,18 +93,7 @@ def shopify_graphql(query, variables=None):
     return data["data"]
 
 
-@app.route("/")
-def home():
-    return "API is running"
-
-
-@app.route("/get_inventory", methods=["GET"])
-def get_inventory():
-    product_name = request.args.get("product", "").strip()
-
-    if not product_name:
-        return jsonify({"error": "Missing product parameter"}), 400
-
+def search_products(product_name):
     query = """
     query GetInventory($search: String!) {
       products(first: 50, query: $search) {
@@ -131,21 +123,70 @@ def get_inventory():
     data = shopify_graphql(query, {"search": search_term})
     products = data["products"]["edges"]
 
-    if not products:
-        return jsonify({"error": "Product not found"}), 404
-
     matched_products = []
 
     for product_edge in products:
         product = product_edge["node"]
         normalized_title = normalize_text(product["title"])
 
-        # match if query is contained in title, or enough words overlap
         query_words = set(search_term.split())
         title_words = set(normalized_title.split())
 
         if search_term in normalized_title or len(query_words & title_words) > 0:
-            matched_products.append({
+            matched_products.append(product)
+
+    return matched_products
+
+
+@app.route("/")
+def home():
+    return "API is running"
+
+
+@app.route("/locations", methods=["GET"])
+def get_locations():
+    query = """
+    query {
+      locations(first: 20) {
+        edges {
+          node {
+            id
+            name
+            isActive
+          }
+        }
+      }
+    }
+    """
+
+    data = shopify_graphql(query)
+
+    return jsonify([
+        {
+            "id": edge["node"]["id"],
+            "name": edge["node"]["name"],
+            "is_active": edge["node"]["isActive"]
+        }
+        for edge in data["locations"]["edges"]
+    ])
+
+
+@app.route("/get_inventory", methods=["GET"])
+def get_inventory():
+    product_name = request.args.get("product", "").strip()
+
+    if not product_name:
+        return jsonify({"error": "Missing product parameter"}), 400
+
+    matched_products = search_products(product_name)
+
+    if not matched_products:
+        return jsonify({"error": "Product not found"}), 404
+
+    return jsonify({
+        "search_term": product_name,
+        "matches": [
+            {
                 "title": product["title"],
                 "variants": [
                     {
@@ -155,14 +196,155 @@ def get_inventory():
                     }
                     for v in product["variants"]["edges"]
                 ]
-            })
+            }
+            for product in matched_products
+        ]
+    })
+
+
+@app.route("/adjust_inventory", methods=["POST"])
+def adjust_inventory():
+    body = request.get_json() or {}
+
+    product_name = (body.get("product") or "").strip()
+    variant_name = (body.get("variant") or "").strip()
+    delta = body.get("delta")
+    location_id = (body.get("location_id") or DEFAULT_LOCATION_ID or "").strip()
+
+    if not product_name:
+        return jsonify({"error": "Missing product"}), 400
+
+    if delta is None:
+        return jsonify({"error": "Missing delta"}), 400
+
+    try:
+        delta = int(delta)
+    except ValueError:
+        return jsonify({"error": "delta must be an integer"}), 400
+
+    if not location_id:
+        return jsonify({"error": "Missing location_id and no DEFAULT_LOCATION_ID is set"}), 400
+
+    matched_products = search_products(product_name)
 
     if not matched_products:
         return jsonify({"error": "Product not found"}), 404
 
+    if len(matched_products) > 1 and not variant_name:
+        return jsonify({
+            "error": "Multiple matching products found. Please specify product more clearly or provide a variant.",
+            "matches": [
+                {
+                    "title": product["title"],
+                    "variants": [
+                        {
+                            "variant_name": v["node"]["displayName"],
+                            "inventory": v["node"]["inventoryQuantity"]
+                        }
+                        for v in product["variants"]["edges"]
+                    ]
+                }
+                for product in matched_products
+            ]
+        }), 409
+
+    chosen_product = matched_products[0]
+
+    # If there are multiple variants, try to match the requested variant
+    variant_edges = chosen_product["variants"]["edges"]
+
+    if not variant_edges:
+        return jsonify({"error": "No variants found for this product"}), 404
+
+    chosen_variant = None
+
+    if variant_name:
+        normalized_variant_query = normalize_text(variant_name)
+        for v in variant_edges:
+            display_name = v["node"]["displayName"]
+            normalized_display_name = normalize_text(display_name)
+            if (
+                normalized_variant_query in normalized_display_name
+                or normalized_display_name in normalized_variant_query
+            ):
+                chosen_variant = v["node"]
+                break
+
+        if not chosen_variant:
+            return jsonify({
+                "error": f"Variant '{variant_name}' not found",
+                "product": chosen_product["title"],
+                "available_variants": [
+                    {
+                        "variant_name": v["node"]["displayName"],
+                        "inventory": v["node"]["inventoryQuantity"]
+                    }
+                    for v in variant_edges
+                ]
+            }), 404
+    else:
+        if len(variant_edges) == 1:
+            chosen_variant = variant_edges[0]["node"]
+        else:
+            return jsonify({
+                "error": "Multiple variants found. Please specify variant.",
+                "product": chosen_product["title"],
+                "available_variants": [
+                    {
+                        "variant_name": v["node"]["displayName"],
+                        "inventory": v["node"]["inventoryQuantity"]
+                    }
+                    for v in variant_edges
+                ]
+            }), 409
+
+    inventory_item_id = chosen_variant["inventoryItem"]["id"]
+
+    mutation = """
+    mutation AdjustInventory($input: InventoryAdjustQuantitiesInput!) {
+      inventoryAdjustQuantities(input: $input) {
+        userErrors {
+          field
+          message
+        }
+        inventoryAdjustmentGroup {
+          reason
+          changes {
+            name
+            delta
+          }
+        }
+      }
+    }
+    """
+
+    variables = {
+        "input": {
+            "reason": "correction",
+            "name": "available",
+            "changes": [
+                {
+                    "inventoryItemId": inventory_item_id,
+                    "locationId": location_id,
+                    "delta": delta
+                }
+            ]
+        }
+    }
+
+    result = shopify_graphql(mutation, variables)
+    payload = result["inventoryAdjustQuantities"]
+
+    if payload["userErrors"]:
+        return jsonify({"error": payload["userErrors"]}), 400
+
     return jsonify({
-        "search_term": product_name,
-        "matches": matched_products
+        "success": True,
+        "product": chosen_product["title"],
+        "variant": chosen_variant["displayName"],
+        "delta": delta,
+        "location_id": location_id,
+        "adjustment": payload["inventoryAdjustmentGroup"]
     })
 
 
@@ -178,6 +360,7 @@ def top_selling():
           node {
             id
             name
+            createdAt
             lineItems(first: 100) {
               edges {
                 node {

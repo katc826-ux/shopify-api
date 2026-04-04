@@ -496,7 +496,7 @@ def update_price():
             return jsonify({"error": payload["userErrors"]}), 400
 
         if not payload.get("productVariants"):
-        return jsonify({"error": "No product variants were returned from Shopify"}), 500
+            return jsonify({"error": "No product variants were returned from Shopify"}), 500
 
         updated_variant = payload["productVariants"][0]
 

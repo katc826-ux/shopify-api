@@ -455,10 +455,18 @@ def update_price():
             return jsonify({"error": "Variant not found"}), 404
 
         mutation = """
-        mutation UpdateVariantPrice($input: ProductVariantInput!) {
-          productVariantUpdate(input: $input) {
-            productVariant {
+        mutation UpdateVariantPrice(
+          $productId: ID!,
+          $variants: [ProductVariantsBulkInput!]!
+        ) {
+          productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+            product {
               id
+              title
+            }
+            productVariants {
+              id
+              title
               price
               compareAtPrice
             }
@@ -471,11 +479,14 @@ def update_price():
         """
 
         variables = {
-            "input": {
-                "id": chosen_variant["id"],
-                "price": str(new_price),
-                "compareAtPrice": str(compare_price) if compare_price is not None else None
-            }
+            "productId": chosen_product["id"],
+            "variants": [
+                {
+                    "id": chosen_variant["id"],
+                    "price": str(new_price),
+                    "compareAtPrice": str(compare_price) if compare_price is not None else None
+                }
+            ]
         }
 
         result = shopify_graphql(mutation, variables)

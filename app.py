@@ -394,6 +394,84 @@ def top_selling():
         for name, qty in top_items
     ])
 
+@app.route("/update_price", methods=["POST"])
+def update_price():
+    body = request.get_json() or {}
+
+    product_name = (body.get("product") or "").strip()
+    variant_name = (body.get("variant") or "").strip()
+    new_price = body.get("price")
+    compare_price = body.get("compare_at_price")
+
+    if not product_name:
+        return jsonify({"error": "Missing product"}), 400
+
+    if new_price is None:
+        return jsonify({"error": "Missing price"}), 400
+
+    matched_products = search_products(product_name)
+
+    if not matched_products:
+        return jsonify({"error": "Product not found"}), 404
+
+    chosen_product = matched_products[0]
+    variant_edges = chosen_product["variants"]["edges"]
+
+    # Find variant
+    chosen_variant = None
+    if variant_name:
+        normalized_query = normalize_text(variant_name)
+        for v in variant_edges:
+            name = v["node"]["displayName"]
+            if normalize_text(name).find(normalized_query) != -1:
+                chosen_variant = v["node"]
+                break
+    else:
+        if len(variant_edges) == 1:
+            chosen_variant = variant_edges[0]["node"]
+        else:
+            return jsonify({"error": "Multiple variants, specify one"}), 409
+
+    if not chosen_variant:
+        return jsonify({"error": "Variant not found"}), 404
+
+    mutation = """
+    mutation UpdateVariantPrice($input: ProductVariantInput!) {
+      productVariantUpdate(input: $input) {
+        productVariant {
+          id
+          price
+          compareAtPrice
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+    """
+
+    variables = {
+        "input": {
+            "id": chosen_variant["id"],
+            "price": str(new_price),
+            "compareAtPrice": str(compare_price) if compare_price else None
+        }
+    }
+
+    result = shopify_graphql(mutation, variables)
+    payload = result["productVariantUpdate"]
+
+    if payload["userErrors"]:
+        return jsonify({"error": payload["userErrors"]}), 400
+
+    return jsonify({
+        "success": True,
+        "product": chosen_product["title"],
+        "variant": chosen_variant["displayName"],
+        "new_price": new_price,
+        "compare_at_price": compare_price
+    })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

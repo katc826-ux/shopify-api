@@ -107,6 +107,8 @@ def search_products(product_name):
                   id
                   displayName
                   inventoryQuantity
+                  price
+                  compareAtPrice
                   inventoryItem {
                     id
                   }
@@ -192,7 +194,9 @@ def get_inventory():
                     {
                         "variant_name": v["node"]["displayName"],
                         "inventory": v["node"]["inventoryQuantity"],
-                        "inventory_item_id": v["node"]["inventoryItem"]["id"]
+                        "inventory_item_id": v["node"]["inventoryItem"]["id"],
+                        "price": v["node"]["price"],
+                        "compare_at_price": v["node"]["compareAtPrice"]
                     }
                     for v in product["variants"]["edges"]
                 ]

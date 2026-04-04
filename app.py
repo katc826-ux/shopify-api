@@ -499,8 +499,8 @@ def update_price():
             "success": True,
             "product": chosen_product["title"],
             "variant": chosen_variant["displayName"],
-            "new_price": payload["productVariant"]["price"],
-            "compare_at_price": payload["productVariant"]["compareAtPrice"]
+            "new_price": payload["productVariants"]["price"],
+            "compare_at_price": payload["productVariants"]["compareAtPrice"]
         })
 
     except Exception as e:

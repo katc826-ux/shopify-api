@@ -400,82 +400,101 @@ def top_selling():
 
 @app.route("/update_price", methods=["POST"])
 def update_price():
-    body = request.get_json() or {}
+    try:
+        body = request.get_json() or {}
 
-    product_name = (body.get("product") or "").strip()
-    variant_name = (body.get("variant") or "").strip()
-    new_price = body.get("price")
-    compare_price = body.get("compare_at_price")
+        product_name = (body.get("product") or "").strip()
+        variant_name = (body.get("variant") or "").strip()
+        new_price = body.get("price")
+        compare_price = body.get("compare_at_price")
 
-    if not product_name:
-        return jsonify({"error": "Missing product"}), 400
+        if not product_name:
+            return jsonify({"error": "Missing product"}), 400
 
-    if new_price is None:
-        return jsonify({"error": "Missing price"}), 400
+        if new_price is None:
+            return jsonify({"error": "Missing price"}), 400
 
-    matched_products = search_products(product_name)
+        matched_products = search_products(product_name)
 
-    if not matched_products:
-        return jsonify({"error": "Product not found"}), 404
+        if not matched_products:
+            return jsonify({"error": "Product not found"}), 404
 
-    chosen_product = matched_products[0]
-    variant_edges = chosen_product["variants"]["edges"]
+        if len(matched_products) > 1 and not variant_name:
+            return jsonify({
+                "error": "Multiple matching products found. Please specify product or variant.",
+                "matches": [
+                    {
+                        "title": product["title"],
+                        "variants": [
+                            {"variant_name": v["node"]["displayName"]}
+                            for v in product["variants"]["edges"]
+                        ]
+                    }
+                    for product in matched_products
+                ]
+            }), 409
 
-    # Find variant
-    chosen_variant = None
-    if variant_name:
-        normalized_query = normalize_text(variant_name)
-        for v in variant_edges:
-            name = v["node"]["displayName"]
-            if normalize_text(name).find(normalized_query) != -1:
-                chosen_variant = v["node"]
-                break
-    else:
-        if len(variant_edges) == 1:
-            chosen_variant = variant_edges[0]["node"]
+        chosen_product = matched_products[0]
+        variant_edges = chosen_product["variants"]["edges"]
+
+        chosen_variant = None
+        if variant_name:
+            normalized_query = normalize_text(variant_name)
+            for v in variant_edges:
+                name = v["node"]["displayName"]
+                if normalized_query in normalize_text(name):
+                    chosen_variant = v["node"]
+                    break
         else:
-            return jsonify({"error": "Multiple variants, specify one"}), 409
+            if len(variant_edges) == 1:
+                chosen_variant = variant_edges[0]["node"]
+            else:
+                return jsonify({"error": "Multiple variants, specify one"}), 409
 
-    if not chosen_variant:
-        return jsonify({"error": "Variant not found"}), 404
+        if not chosen_variant:
+            return jsonify({"error": "Variant not found"}), 404
 
-    mutation = """
-    mutation UpdateVariantPrice($input: ProductVariantInput!) {
-      productVariantUpdate(input: $input) {
-        productVariant {
-          id
-          price
-          compareAtPrice
+        mutation = """
+        mutation UpdateVariantPrice($input: ProductVariantInput!) {
+          productVariantUpdate(input: $input) {
+            productVariant {
+              id
+              price
+              compareAtPrice
+            }
+            userErrors {
+              field
+              message
+            }
+          }
         }
-        userErrors {
-          field
-          message
+        """
+
+        variables = {
+            "input": {
+                "id": chosen_variant["id"],
+                "price": str(new_price),
+                "compareAtPrice": str(compare_price) if compare_price is not None else None
+            }
         }
-      }
-    }
-    """
 
-    variables = {
-        "input": {
-            "id": chosen_variant["id"],
-            "price": str(new_price),
-            "compareAtPrice": str(compare_price) if compare_price else None
-        }
-    }
+        result = shopify_graphql(mutation, variables)
+        payload = result["productVariantUpdate"]
 
-    result = shopify_graphql(mutation, variables)
-    payload = result["productVariantUpdate"]
+        if payload["userErrors"]:
+            return jsonify({"error": payload["userErrors"]}), 400
 
-    if payload["userErrors"]:
-        return jsonify({"error": payload["userErrors"]}), 400
+        return jsonify({
+            "success": True,
+            "product": chosen_product["title"],
+            "variant": chosen_variant["displayName"],
+            "new_price": payload["productVariant"]["price"],
+            "compare_at_price": payload["productVariant"]["compareAtPrice"]
+        })
 
-    return jsonify({
-        "success": True,
-        "product": chosen_product["title"],
-        "variant": chosen_variant["displayName"],
-        "new_price": new_price,
-        "compare_at_price": compare_price
-    })
+    except Exception as e:
+        print("update_price failed:", str(e))
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

@@ -419,9 +419,9 @@ def update_price():
         if not matched_products:
             return jsonify({"error": "Product not found"}), 404
 
-        if len(matched_products) > 1 and not variant_name:
+        if len(matched_products) > 1:
             return jsonify({
-                "error": "Multiple matching products found. Please specify product or variant.",
+                "error": "Multiple matching products found. Please specify product more clearly or provide a variant.",
                 "matches": [
                     {
                         "title": product["title"],
@@ -493,7 +493,6 @@ def update_price():
         })
 
     except Exception as e:
-        print("update_price failed:", str(e))
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":

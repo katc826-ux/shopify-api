@@ -495,12 +495,17 @@ def update_price():
         if payload["userErrors"]:
             return jsonify({"error": payload["userErrors"]}), 400
 
+        if not payload.get("productVariants"):
+        return jsonify({"error": "No product variants were returned from Shopify"}), 500
+
+        updated_variant = payload["productVariants"][0]
+
         return jsonify({
             "success": True,
             "product": chosen_product["title"],
             "variant": chosen_variant["displayName"],
-            "new_price": payload["productVariants"]["price"],
-            "compare_at_price": payload["productVariants"]["compareAtPrice"]
+            "new_price": updated_variant["price"],
+            "compare_at_price": updated_variant["compareAtPrice"]
         })
 
     except Exception as e:

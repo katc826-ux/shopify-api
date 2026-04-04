@@ -490,7 +490,7 @@ def update_price():
         }
 
         result = shopify_graphql(mutation, variables)
-        payload = result["productVariantUpdate"]
+        payload = result["productVariantsBulkUpdate"]
 
         if payload["userErrors"]:
             return jsonify({"error": payload["userErrors"]}), 400

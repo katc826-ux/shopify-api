@@ -13,45 +13,71 @@ def get_conn():
 
 
 def init_db():
-    sql = """
-    CREATE TABLE IF NOT EXISTS scheduled_promotions (
-        id SERIAL PRIMARY KEY,
-        product_id TEXT,
-        variant_id TEXT NOT NULL,
-        sku TEXT,
-        product_title TEXT NOT NULL,
-        variant_title TEXT NOT NULL,
-        regular_price NUMERIC(10,2) NOT NULL,
-        promo_price NUMERIC(10,2) NOT NULL,
-        start_at TIMESTAMPTZ NOT NULL,
-        end_at TIMESTAMPTZ NOT NULL,
-        timezone TEXT NOT NULL DEFAULT 'America/Toronto',
-        start_applied BOOLEAN NOT NULL DEFAULT FALSE,
-        end_applied BOOLEAN NOT NULL DEFAULT FALSE,
-        status TEXT NOT NULL DEFAULT 'approved',
-        last_error TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql)
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scheduled_promotions (
+                    id SERIAL PRIMARY KEY,
+                    product_id TEXT,
+                    variant_id TEXT,
+                    sku TEXT,
+                    product_title TEXT NOT NULL,
+                    variant_title TEXT NOT NULL,
+                    regular_price NUMERIC(10,2) NOT NULL,
+                    promo_price NUMERIC(10,2) NOT NULL,
+                    start_at TIMESTAMPTZ NOT NULL,
+                    end_at TIMESTAMPTZ NOT NULL,
+                    timezone TEXT NOT NULL DEFAULT 'America/Toronto',
+                    start_applied BOOLEAN NOT NULL DEFAULT FALSE,
+                    end_applied BOOLEAN NOT NULL DEFAULT FALSE,
+                    status TEXT NOT NULL DEFAULT 'approved',
+                    last_error TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+            # Make old installs compatible with the new title/SKU-based flow
+            cur.execute("ALTER TABLE scheduled_promotions ALTER COLUMN variant_id DROP NOT NULL;")
+
         conn.commit()
 
 
 def create_promotion(
-    product_id,
-    variant_id,
-    sku,
     product_title,
     variant_title,
     regular_price,
     promo_price,
     start_at,
     end_at,
+    sku=None,
     timezone_name="America/Toronto",
+    product_id=None,
+    variant_id=None,
 ):
+    regular_price = Decimal(str(regular_price))
+    promo_price = Decimal(str(promo_price))
+
+    if not product_title or not str(product_title).strip():
+        raise ValueError("product_title is required")
+
+    if variant_title is None:
+        variant_title = ""
+
+    if regular_price <= 0:
+        raise ValueError("regular_price must be greater than 0")
+
+    if promo_price <= 0:
+        raise ValueError("promo_price must be greater than 0")
+
+    if promo_price >= regular_price:
+        raise ValueError("promo_price must be lower than regular_price")
+
+    if end_at <= start_at:
+        raise ValueError("end_at must be after start_at")
+
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -75,10 +101,10 @@ def create_promotion(
                     product_id,
                     variant_id,
                     sku,
-                    product_title,
-                    variant_title,
-                    Decimal(str(regular_price)),
-                    Decimal(str(promo_price)),
+                    str(product_title).strip(),
+                    str(variant_title).strip(),
+                    regular_price,
+                    promo_price,
                     start_at,
                     end_at,
                     timezone_name,
@@ -86,6 +112,7 @@ def create_promotion(
             )
             row = cur.fetchone()
         conn.commit()
+
     return row["id"]
 
 
@@ -160,6 +187,7 @@ def get_due_promotion_ends():
             )
             return cur.fetchall()
 
+
 def cancel_promotion(promotion_id: int):
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -221,6 +249,6 @@ def mark_failed(promotion_id: int, error_message: str):
                     updated_at = NOW()
                 WHERE id = %s
                 """,
-                (error_message[:2000], promotion_id),
+                (str(error_message)[:2000], promotion_id),
             )
         conn.commit()

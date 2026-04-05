@@ -8,17 +8,12 @@ from db import (
 )
 from shopify_client import update_price_by_variant_id
 
-
-def process_start_promotions():
-    due = get_due_promotion_starts()
-
-    for promo in due:
+for promo in due:
         try:
-            result = update_price_by_variant_id(
-                product_id=promo["product_id"],
-                variant_id=promo["variant_id"],
+            result = update_price_by_match(
                 product_title=promo["product_title"],
                 variant_title=promo["variant_title"],
+                sku=promo["sku"],
                 new_price=promo["promo_price"],
                 compare_price=promo["regular_price"],
             )
@@ -34,11 +29,10 @@ def process_end_promotions():
 
     for promo in due:
         try:
-            result = update_price_by_variant_id(
-                product_id=promo["product_id"],
-                variant_id=promo["variant_id"],
+            result = update_price_by_match(
                 product_title=promo["product_title"],
                 variant_title=promo["variant_title"],
+                sku=promo["sku"],
                 new_price=promo["regular_price"],
                 compare_price=None,
             )
@@ -60,5 +54,7 @@ def main():
         print(f"Cron run failed: {e}")
         raise
 
+
 if __name__ == "__main__":
     main()
+

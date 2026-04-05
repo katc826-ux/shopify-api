@@ -53,7 +53,7 @@ def main():
     init_db()
     process_start_promotions()
     process_end_promotions()
-
+    print("Done processing promotions.")
 
 if __name__ == "__main__":
     main()

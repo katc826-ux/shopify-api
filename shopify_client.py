@@ -1,8 +1,9 @@
 import os
 import re
 import time
-import requests
 from datetime import datetime, timedelta, timezone
+
+import requests
 
 CLIENT_ID = os.environ.get("CLIENT_ID")
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
@@ -97,11 +98,13 @@ def search_products(product_name: str):
           node {
             id
             title
-            variants(first: 50) {
+            variants(first: 100) {
               edges {
                 node {
                   id
+                  title
                   displayName
+                  sku
                   inventoryQuantity
                   price
                   compareAtPrice
@@ -162,50 +165,113 @@ def get_locations_data():
     ]
 
 
-def _choose_variant(product, variant_name: str = ""):
+def _variant_title_matches(variant_node, variant_name: str) -> bool:
+    if not variant_name:
+        return True
+
+    normalized_variant_query = normalize_text(variant_name)
+    candidate_values = [
+        variant_node.get("title", ""),
+        variant_node.get("displayName", ""),
+    ]
+
+    for value in candidate_values:
+        normalized_value = normalize_text(value)
+        if (
+            normalized_variant_query == normalized_value
+            or normalized_variant_query in normalized_value
+            or normalized_value in normalized_variant_query
+        ):
+            return True
+
+    return False
+
+
+def _choose_variant(product, variant_name: str = "", sku: str = None):
     variant_edges = product["variants"]["edges"]
 
     if not variant_edges:
         raise LookupError("No variants found for this product")
 
+    if sku:
+        normalized_sku = normalize_text(sku)
+        sku_matches = [
+            edge["node"]
+            for edge in variant_edges
+            if normalize_text(edge["node"].get("sku", "")) == normalized_sku
+        ]
+
+        if variant_name:
+            sku_and_variant_matches = [
+                node for node in sku_matches if _variant_title_matches(node, variant_name)
+            ]
+            if len(sku_and_variant_matches) == 1:
+                return sku_and_variant_matches[0]
+            if len(sku_and_variant_matches) > 1:
+                raise RuntimeError(
+                    f"Multiple variants matched SKU '{sku}' and variant '{variant_name}'"
+                )
+
+        if len(sku_matches) == 1:
+            return sku_matches[0]
+        if len(sku_matches) > 1:
+            raise RuntimeError(f"Multiple variants matched SKU '{sku}'")
+
     if variant_name:
-        normalized_variant_query = normalize_text(variant_name)
-        for v in variant_edges:
-            display_name = v["node"]["displayName"]
-            normalized_display_name = normalize_text(display_name)
-            if (
-                normalized_variant_query in normalized_display_name
-                or normalized_display_name in normalized_variant_query
-            ):
-                return v["node"]
+        variant_matches = [
+            edge["node"]
+            for edge in variant_edges
+            if _variant_title_matches(edge["node"], variant_name)
+        ]
+
+        if len(variant_matches) == 1:
+            return variant_matches[0]
+        if len(variant_matches) > 1:
+            raise RuntimeError(f"Multiple variants matched variant '{variant_name}'")
 
         raise LookupError(f"Variant '{variant_name}' not found")
 
     if len(variant_edges) == 1:
         return variant_edges[0]["node"]
 
-    raise RuntimeError("Multiple variants found. Please specify variant.")
+    raise RuntimeError("Multiple variants found. Please specify variant or SKU.")
 
 
-def _choose_product(matched_products, variant_name: str = ""):
+def _choose_product(matched_products, product_name: str, variant_name: str = "", sku: str = None):
     if not matched_products:
         raise LookupError("Product not found")
 
-    if len(matched_products) == 1:
-        return matched_products[0]
+    normalized_product_query = normalize_text(product_name)
 
-    if variant_name:
-        normalized_variant_query = normalize_text(variant_name)
-        narrowed = []
-        for product in matched_products:
-            for edge in product["variants"]["edges"]:
-                if normalized_variant_query in normalize_text(edge["node"]["displayName"]):
-                    narrowed.append(product)
-                    break
-        if len(narrowed) == 1:
-            return narrowed[0]
+    exact_title_matches = [
+        product
+        for product in matched_products
+        if normalize_text(product["title"]) == normalized_product_query
+    ]
 
-    raise RuntimeError("Multiple matching products found. Please specify product more clearly or provide a variant.")
+    candidates = exact_title_matches or matched_products
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    narrowed = []
+
+    for product in candidates:
+        try:
+            _choose_variant(product, variant_name=variant_name, sku=sku)
+            narrowed.append(product)
+        except Exception:
+            continue
+
+    if len(narrowed) == 1:
+        return narrowed[0]
+
+    if len(narrowed) > 1:
+        raise RuntimeError(
+            "Multiple matching products found. Please use a more exact product title or add SKU."
+        )
+
+    raise LookupError("Product found, but no matching variant/SKU was found")
 
 
 def adjust_inventory_by_product(product_name: str, variant_name: str, delta, location_id: str = None):
@@ -219,7 +285,7 @@ def adjust_inventory_by_product(product_name: str, variant_name: str, delta, loc
         raise ValueError("Missing location_id and no DEFAULT_LOCATION_ID is set")
 
     matched_products = search_products(product_name)
-    chosen_product = _choose_product(matched_products, variant_name)
+    chosen_product = _choose_product(matched_products, product_name, variant_name)
     chosen_variant = _choose_variant(chosen_product, variant_name)
 
     inventory_item_id = chosen_variant["inventoryItem"]["id"]
@@ -319,8 +385,37 @@ def update_price_by_product(product_name: str, variant_name: str, new_price, com
         raise ValueError("Missing price")
 
     matched_products = search_products(product_name)
-    chosen_product = _choose_product(matched_products, variant_name)
+    chosen_product = _choose_product(matched_products, product_name, variant_name)
     chosen_variant = _choose_variant(chosen_product, variant_name)
+
+    return update_price_by_variant_id(
+        product_id=chosen_product["id"],
+        variant_id=chosen_variant["id"],
+        product_title=chosen_product["title"],
+        variant_title=chosen_variant["displayName"],
+        new_price=new_price,
+        compare_price=compare_price,
+    )
+
+
+def update_price_by_match(product_title: str, variant_title: str, sku: str, new_price, compare_price=None):
+    if not product_title:
+        raise ValueError("Missing product_title")
+    if new_price is None:
+        raise ValueError("Missing new_price")
+
+    matched_products = search_products(product_title)
+    chosen_product = _choose_product(
+        matched_products,
+        product_name=product_title,
+        variant_name=variant_title,
+        sku=sku,
+    )
+    chosen_variant = _choose_variant(
+        chosen_product,
+        variant_name=variant_title,
+        sku=sku,
+    )
 
     return update_price_by_variant_id(
         product_id=chosen_product["id"],
@@ -369,8 +464,8 @@ def update_price_by_variant_id(
         "price": str(new_price),
     }
 
-    if compare_price is not None:
-        variant_payload["compareAtPrice"] = str(compare_price)
+    # Explicitly clear compare-at price when ending a promotion
+    variant_payload["compareAtPrice"] = str(compare_price) if compare_price is not None else None
 
     variables = {
         "productId": product_id,

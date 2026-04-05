@@ -160,6 +160,24 @@ def get_due_promotion_ends():
             )
             return cur.fetchall()
 
+def cancel_promotion(promotion_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE scheduled_promotions
+                SET status = 'cancelled',
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'approved'
+                RETURNING *
+                """,
+                (promotion_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return row
+
 
 def mark_start_applied(promotion_id: int):
     with get_conn() as conn:

@@ -50,6 +50,7 @@ def process_end_promotions():
 
 
 def main():
+    print("Cron run started")
     init_db()
     process_start_promotions()
     process_end_promotions()

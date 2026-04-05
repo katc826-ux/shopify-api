@@ -51,10 +51,14 @@ def process_end_promotions():
 
 def main():
     print("Cron run started")
-    init_db()
-    process_start_promotions()
-    process_end_promotions()
-    print("Done processing promotions.")
+    try:
+        init_db()
+        process_start_promotions()
+        process_end_promotions()
+        print("Cron run finished")
+    except Exception as e:
+        print(f"Cron run failed: {e}")
+        raise
 
 if __name__ == "__main__":
     main()

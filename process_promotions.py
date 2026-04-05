@@ -6,7 +6,7 @@ from db import (
     mark_end_applied,
     mark_failed,
 )
-from shopify_client import update_price_by_variant_id
+from shopify_client import update_price_by_match
 
 for promo in due:
         try:

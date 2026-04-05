@@ -1,5 +1,4 @@
 import os
-from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify
 
 from shopify_client import (
@@ -14,11 +13,11 @@ from db import (
     create_promotion,
     list_promotions,
     get_promotion_by_id,
+    cancel_promotion,
 )
 
 app = Flask(__name__)
 
-# Optional: initialize DB table on startup
 with app.app_context():
     init_db()
 
@@ -57,6 +56,8 @@ def get_inventory():
                     "variants": [
                         {
                             "variant_name": v["node"]["displayName"],
+                            "variant_title": v["node"]["title"],
+                            "sku": v["node"].get("sku"),
                             "inventory": v["node"]["inventoryQuantity"],
                             "inventory_item_id": v["node"]["inventoryItem"]["id"],
                             "price": v["node"]["price"],
@@ -64,10 +65,10 @@ def get_inventory():
                             "variant_id": v["node"]["id"],
                         }
                         for v in product["variants"]["edges"]
-                    ]
+                    ],
                 }
                 for product in matched_products
-            ]
+            ],
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -164,7 +165,6 @@ def add_promotion():
         required_fields = [
             "product_title",
             "variant_title",
-            "variant_id",
             "regular_price",
             "promo_price",
             "start_at",
@@ -175,16 +175,16 @@ def add_promotion():
             return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
 
         promo_id = create_promotion(
-            product_id=body.get("product_id"),
-            variant_id=body["variant_id"],
-            sku=body.get("sku"),
             product_title=body["product_title"],
             variant_title=body["variant_title"],
+            sku=body.get("sku"),
             regular_price=body["regular_price"],
             promo_price=body["promo_price"],
             start_at=body["start_at"],
             end_at=body["end_at"],
             timezone_name=body.get("timezone", "America/Toronto"),
+            product_id=body.get("product_id"),
+            variant_id=body.get("variant_id"),
         )
 
         return jsonify({
@@ -214,6 +214,21 @@ def promotion_detail(promotion_id):
         if not promo:
             return jsonify({"error": "Promotion not found"}), 404
         return jsonify(promo)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/promotions/<int:promotion_id>/cancel", methods=["POST"])
+def cancel_promotion_route(promotion_id):
+    try:
+        promo = cancel_promotion(promotion_id)
+        if not promo:
+            return jsonify({"error": "Promotion not found or not cancellable"}), 404
+        return jsonify({
+            "success": True,
+            "promotion_id": promotion_id,
+            "status": promo["status"],
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

@@ -8,7 +8,10 @@ from db import (
 )
 from shopify_client import update_price_by_match
 
-for promo in due:
+def process_start_promotions():
+    due = get_due_promotion_starts()
+
+    for promo in due:
         try:
             result = update_price_by_match(
                 product_title=promo["product_title"],

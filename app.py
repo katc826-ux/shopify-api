@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify
 
 from shopify_client import (
     search_products,
+    search_products_with_inventory,
     get_locations_data,
     adjust_inventory_by_product,
     get_top_selling_products,
@@ -43,7 +44,7 @@ def get_inventory():
         if not product_name:
             return jsonify({"error": "Missing product parameter"}), 400
 
-        matched_products = search_products(product_name)
+        matched_products = search_products_with_inventory(product_name)
 
         if not matched_products:
             return jsonify({"error": "Product not found"}), 404
@@ -59,15 +60,13 @@ def get_inventory():
                             "variant_title": v["node"]["title"],
                             "sku": v["node"].get("sku"),
                             "inventory": v["node"]["inventoryQuantity"],
-                            "inventory_item_id": v["node"]["inventoryItem"]["id"],
                             "price": v["node"]["price"],
                             "compare_at_price": v["node"]["compareAtPrice"],
-                            "variant_id": v["node"]["id"],
                         }
-                        for v in product["variants"]["edges"]
+                        for v in product["variants"]["edges"][:10]
                     ],
                 }
-                for product in matched_products
+                for product in matched_products[:5]
             ],
         })
     except Exception as e:

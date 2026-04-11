@@ -90,15 +90,64 @@ def shopify_graphql(query: str, variables=None):
     return data["data"]
 
 
-def search_products(product_name: str):
+def search_products(product_name: str, limit_products: int = 15, limit_variants: int = 15):
     query = """
-    query GetInventory($search: String!) {
-      products(first: 50, query: $search) {
+    query SearchProducts($search: String!, $productLimit: Int!, $variantLimit: Int!) {
+      products(first: $productLimit, query: $search) {
         edges {
           node {
             id
             title
-            variants(first: 100) {
+            variants(first: $variantLimit) {
+              edges {
+                node {
+                  id
+                  title
+                  displayName
+                  sku
+                  price
+                  compareAtPrice
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    search_term = normalize_text(product_name)
+    data = shopify_graphql(
+        query,
+        {
+            "search": search_term,
+            "productLimit": limit_products,
+            "variantLimit": limit_variants,
+        },
+    )
+
+    products = data["products"]["edges"]
+    matched_products = []
+
+    for product_edge in products:
+        product = product_edge["node"]
+        normalized_title = normalize_text(product["title"])
+
+        if normalized_title == search_term or search_term in normalized_title:
+            matched_products.append(product)
+
+    return matched_products
+
+
+def search_products_with_inventory(product_name: str, limit_products: int = 15, limit_variants: int = 25):
+    query = """
+    query SearchProductsWithInventory($search: String!, $productLimit: Int!, $variantLimit: Int!) {
+      products(first: $productLimit, query: $search) {
+        edges {
+          node {
+            id
+            title
+            variants(first: $variantLimit) {
               edges {
                 node {
                   id
@@ -121,23 +170,27 @@ def search_products(product_name: str):
     """
 
     search_term = normalize_text(product_name)
-    data = shopify_graphql(query, {"search": search_term})
-    products = data["products"]["edges"]
+    data = shopify_graphql(
+        query,
+        {
+            "search": search_term,
+            "productLimit": limit_products,
+            "variantLimit": limit_variants,
+        },
+    )
 
+    products = data["products"]["edges"]
     matched_products = []
 
     for product_edge in products:
         product = product_edge["node"]
         normalized_title = normalize_text(product["title"])
 
-        query_words = set(search_term.split())
-        title_words = set(normalized_title.split())
-
-        if search_term in normalized_title or len(query_words & title_words) > 0:
-            matched_products.append(product)
+        if normalized_title == search_term or search_term in normalized_title:
+            matched_products.append(product["node"] if "node" in product else product)
 
     return matched_products
-
+    
 
 def get_locations_data():
     query = """

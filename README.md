@@ -37,5 +37,5 @@ If SMTP is configured, the script emails the report to `sales@speedydrone.ca` by
 - `SMTP_PASSWORD`: SMTP login password
 - `SMTP_USE_TLS`: set to `false` to disable STARTTLS
 - `SMTP_FROM_EMAIL`: sender email address shown on the report
-- `DJI_CONSUMER_INCLUDE_KEYWORDS`: comma-separated include keywords, default `dji`
+- `DJI_CONSUMER_INCLUDE_KEYWORDS`: comma-separated include keywords, default `dji,osmo`
 - `DJI_CONSUMER_EXCLUDE_KEYWORDS`: comma-separated exclude keywords used to skip enterprise/non-consumer lines

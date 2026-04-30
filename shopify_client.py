@@ -22,7 +22,7 @@ SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").strip().lower() != "false"
 SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL") or SMTP_USERNAME or "no-reply@localhost"
 DJI_CONSUMER_INCLUDE_KEYWORDS = [
     keyword.strip().lower()
-    for keyword in os.environ.get("DJI_CONSUMER_INCLUDE_KEYWORDS", "dji").split(",")
+    for keyword in os.environ.get("DJI_CONSUMER_INCLUDE_KEYWORDS", "dji,osmo").split(",")
     if keyword.strip()
 ]
 DJI_CONSUMER_EXCLUDE_KEYWORDS = [

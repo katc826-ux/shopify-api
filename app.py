@@ -19,7 +19,6 @@ from db import (
 )
 
 app = Flask(__name__)
-API_AUTH_TOKEN = (os.environ.get("API_AUTH_TOKEN") or "").strip()
 
 with app.app_context():
     init_db()
@@ -30,44 +29,12 @@ def home():
     return "API is running"
 
 
-def _error_response(message="Internal server error", status=500):
-    return jsonify({"error": message}), status
-
-
-def _is_authorized(req):
-    if not API_AUTH_TOKEN:
-        raise RuntimeError("Missing API_AUTH_TOKEN environment variable")
-
-    header_token = (req.headers.get("X-API-Token") or "").strip()
-    auth_header = (req.headers.get("Authorization") or "").strip()
-    bearer_token = ""
-
-    if auth_header.lower().startswith("bearer "):
-        bearer_token = auth_header[7:].strip()
-
-    return header_token == API_AUTH_TOKEN or bearer_token == API_AUTH_TOKEN
-
-
-@app.before_request
-def require_api_auth():
-    if request.path == "/":
-        return None
-
-    try:
-        if not _is_authorized(request):
-            return _error_response("Unauthorized", 401)
-    except RuntimeError:
-        return _error_response("Server is missing API authentication configuration", 500)
-
-    return None
-
-
 @app.route("/locations", methods=["GET"])
 def get_locations():
     try:
         return jsonify(get_locations_data())
     except Exception as e:
-        return _error_response()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/get_inventory", methods=["GET"])
@@ -104,7 +71,7 @@ def get_inventory():
             ],
         })
     except Exception as e:
-        return _error_response()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/adjust_inventory", methods=["POST"])
@@ -137,7 +104,7 @@ def adjust_inventory():
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 409
     except Exception as e:
-        return _error_response()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/top_selling", methods=["GET"])
@@ -150,7 +117,7 @@ def top_selling():
         results = get_top_selling_products(days=days, limit=5)
         return jsonify(results)
     except Exception as e:
-        return _error_response()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/reports/weekly_dji_consumer_sales", methods=["GET"])
@@ -173,7 +140,7 @@ def weekly_dji_consumer_sales():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        return _error_response()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/update_price", methods=["POST"])
@@ -206,7 +173,7 @@ def update_price():
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 409
     except Exception as e:
-        return _error_response()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/promotions", methods=["POST"])
@@ -250,7 +217,7 @@ def add_promotion():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        return _error_response()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/promotions", methods=["GET"])
@@ -260,7 +227,7 @@ def promotions():
         results = list_promotions(status=status)
         return jsonify(results)
     except Exception as e:
-        return _error_response()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/promotions/<int:promotion_id>", methods=["GET"])
@@ -271,7 +238,7 @@ def promotion_detail(promotion_id):
             return jsonify({"error": "Promotion not found"}), 404
         return jsonify(promo)
     except Exception as e:
-        return _error_response()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/promotions/<int:promotion_id>/cancel", methods=["POST"])
@@ -286,7 +253,7 @@ def cancel_promotion_route(promotion_id):
             "status": promo["status"],
         })
     except Exception as e:
-        return _error_response()
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

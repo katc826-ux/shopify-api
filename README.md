@@ -1,22 +1,6 @@
 # shopify-api
 API call to Shopify to track store inventory and top selling items
 
-## API auth
-
-Set `API_AUTH_TOKEN` in your deployment environment.
-
-All API routes except `/` require one of these headers:
-
-```bash
-X-API-Token: your-secret-token
-```
-
-or
-
-```bash
-Authorization: Bearer your-secret-token
-```
-
 ## Weekly DJI consumer sales report
 
 This project now includes a weekly DJI consumer sales report that returns:

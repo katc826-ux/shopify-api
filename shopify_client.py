@@ -1,7 +1,10 @@
 import os
 import re
+import smtplib
 import time
-from datetime import datetime, timedelta, timezone
+from collections import defaultdict
+from datetime import date, datetime, time as dt_time, timedelta, timezone
+from email.message import EmailMessage
 
 import requests
 
@@ -10,6 +13,27 @@ CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 SHOP_DOMAIN = os.environ.get("SHOP_DOMAIN")
 DEFAULT_LOCATION_ID = os.environ.get("DEFAULT_LOCATION_ID")
 API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2026-01")
+REPORT_EMAIL_TO = os.environ.get("REPORT_EMAIL_TO", "sales@speedydrone.ca")
+SMTP_HOST = os.environ.get("SMTP_HOST")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
+SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").strip().lower() != "false"
+SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL") or SMTP_USERNAME or "no-reply@localhost"
+DJI_CONSUMER_INCLUDE_KEYWORDS = [
+    keyword.strip().lower()
+    for keyword in os.environ.get("DJI_CONSUMER_INCLUDE_KEYWORDS", "dji").split(",")
+    if keyword.strip()
+]
+DJI_CONSUMER_EXCLUDE_KEYWORDS = [
+    keyword.strip().lower()
+    for keyword in os.environ.get(
+        "DJI_CONSUMER_EXCLUDE_KEYWORDS",
+        "enterprise,matrice,agrass,dock,docks,zenmuse,teras,delivery,dji care",
+    ).split(",")
+    if keyword.strip()
+]
+MISSING_SKU_LABEL = os.environ.get("MISSING_SKU_LABEL", "(missing SKU)")
 
 _token_cache = {
     "access_token": None,
@@ -431,6 +455,262 @@ def get_top_selling_products(days: int = 7, limit: int = 5):
     top_items = sorted(sales.items(), key=lambda x: x[1], reverse=True)[:limit]
 
     return [{"product": name, "units_sold": qty} for name, qty in top_items]
+
+
+def _is_dji_consumer_product(product_title: str, sku: str = "") -> bool:
+    haystack = f"{product_title or ''} {sku or ''}".lower()
+
+    if not any(keyword in haystack for keyword in DJI_CONSUMER_INCLUDE_KEYWORDS):
+        return False
+
+    if any(keyword in haystack for keyword in DJI_CONSUMER_EXCLUDE_KEYWORDS):
+        return False
+
+    return True
+
+
+def _format_markdown_table(rows):
+    headers = [
+        "Net Sold Units",
+        "Variant SKU",
+        "Product Title",
+        "Inventory On Hand",
+    ]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| --- | --- | --- | --- |",
+    ]
+
+    for row in rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row["net_sold_units"]),
+                    str(row["sku"] or MISSING_SKU_LABEL),
+                    str(row["product_title"] or ""),
+                    str(row["inventory_on_hand"]),
+                ]
+            )
+            + " |"
+        )
+
+    return "\n".join(lines)
+
+
+def _parse_report_date(value: str, field_name: str) -> date:
+    try:
+        return datetime.strptime((value or "").strip(), "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(f"{field_name} must be in YYYY-MM-DD format")
+
+
+def _resolve_report_range(start_date: str = None, end_date: str = None, days: int = 7):
+    if start_date or end_date:
+        if not start_date or not end_date:
+            raise ValueError("start_date and end_date must both be provided")
+
+        start_day = _parse_report_date(start_date, "start_date")
+        end_day = _parse_report_date(end_date, "end_date")
+
+        if end_day < start_day:
+            raise ValueError("end_date must be on or after start_date")
+
+        start_dt = datetime.combine(start_day, dt_time.min, tzinfo=timezone.utc)
+        end_dt = datetime.combine(end_day, dt_time.max, tzinfo=timezone.utc)
+        return {
+            "start_date": start_day.isoformat(),
+            "end_date": end_day.isoformat(),
+            "start_at": start_dt,
+            "end_at": end_dt,
+            "days": (end_day - start_day).days + 1,
+        }
+
+    if days < 1:
+        raise ValueError("days must be >= 1")
+
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(days=days)
+    return {
+        "start_date": start_dt.date().isoformat(),
+        "end_date": end_dt.date().isoformat(),
+        "start_at": start_dt,
+        "end_at": end_dt,
+        "days": days,
+    }
+
+
+def get_weekly_dji_consumer_sales_report(days: int = 7, start_date: str = None, end_date: str = None):
+    report_range = _resolve_report_range(start_date=start_date, end_date=end_date, days=days)
+    start_at = report_range["start_at"]
+    end_at = report_range["end_at"]
+    start_date_value = report_range["start_date"]
+    end_date_value = report_range["end_date"]
+
+    query = """
+    query WeeklyDJIConsumerSales($search: String!, $cursor: String) {
+      orders(first: 100, after: $cursor, query: $search, sortKey: CREATED_AT, reverse: true) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            id
+            createdAt
+            lineItems(first: 100) {
+              edges {
+                node {
+                  name
+                  sku
+                  quantity
+                  currentQuantity
+                  variant {
+                    id
+                    sku
+                    inventoryQuantity
+                    product {
+                      title
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    search_query = f"created_at:>={start_at.strftime('%Y-%m-%d')} created_at:<={end_at.strftime('%Y-%m-%d')}"
+    cursor = None
+    sales_by_variant = defaultdict(
+        lambda: {
+            "product_title": "",
+            "sku": "",
+            "inventory_on_hand": 0,
+            "net_sold_units": 0,
+        }
+    )
+
+    while True:
+        data = shopify_graphql(
+            query,
+            {
+                "search": search_query,
+                "cursor": cursor,
+            },
+        )
+        orders = data["orders"]
+
+        for order_edge in orders["edges"]:
+            order = order_edge["node"]
+            for item_edge in order["lineItems"]["edges"]:
+                item = item_edge["node"]
+                variant = item.get("variant") or {}
+                product = variant.get("product") or {}
+                sku = variant.get("sku") or item.get("sku") or ""
+                product_title = product.get("title") or item.get("name") or ""
+
+                if not _is_dji_consumer_product(product_title, sku):
+                    continue
+
+                variant_id = variant.get("id") or f"title:{product_title}|sku:{sku}"
+                inventory_on_hand = variant.get("inventoryQuantity")
+                net_sold_units = item.get("currentQuantity")
+                if net_sold_units is None:
+                    net_sold_units = item.get("quantity") or 0
+
+                sales_by_variant[variant_id]["product_title"] = product_title
+                sales_by_variant[variant_id]["sku"] = sku or MISSING_SKU_LABEL
+                sales_by_variant[variant_id]["inventory_on_hand"] = (
+                    inventory_on_hand if inventory_on_hand is not None else 0
+                )
+                sales_by_variant[variant_id]["net_sold_units"] += int(net_sold_units)
+
+        if not orders["pageInfo"]["hasNextPage"]:
+            break
+        cursor = orders["pageInfo"]["endCursor"]
+
+    rows = sorted(
+        sales_by_variant.values(),
+        key=lambda row: (-row["net_sold_units"], row["product_title"], row["sku"]),
+    )
+
+    return {
+        "report_name": "weekly_dji_consumer_sales",
+        "days": report_range["days"],
+        "start_date": start_date_value,
+        "end_date": end_date_value,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "filters": {
+            "include_keywords": DJI_CONSUMER_INCLUDE_KEYWORDS,
+            "exclude_keywords": DJI_CONSUMER_EXCLUDE_KEYWORDS,
+        },
+        "rows": rows,
+        "markdown_table": _format_markdown_table(rows),
+    }
+
+
+def send_weekly_dji_consumer_sales_report(
+    days: int = 7,
+    recipient_email: str = None,
+    start_date: str = None,
+    end_date: str = None,
+):
+    report = get_weekly_dji_consumer_sales_report(
+        days=days,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    destination = (recipient_email or REPORT_EMAIL_TO or "").strip()
+
+    if not destination:
+        return {
+            "success": False,
+            "sent": False,
+            "reason": "Missing report recipient email",
+            "report": report,
+        }
+
+    if not SMTP_HOST:
+        return {
+            "success": False,
+            "sent": False,
+            "reason": "Missing SMTP_HOST",
+            "report": report,
+        }
+
+    message = EmailMessage()
+    message["Subject"] = (
+        "DJI consumer sales report - "
+        f"{report['start_date']} to {report['end_date']}"
+    )
+    message["From"] = SMTP_FROM_EMAIL
+    message["To"] = destination
+    message.set_content(
+        "\n".join(
+            [
+                f"DJI consumer products sold from {report['start_date']} to {report['end_date']}",
+                "",
+                report["markdown_table"],
+            ]
+        )
+    )
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
+        if SMTP_USE_TLS:
+            smtp.starttls()
+        if SMTP_USERNAME and SMTP_PASSWORD:
+            smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+        smtp.send_message(message)
+
+    return {
+        "success": True,
+        "sent": True,
+        "destination": destination,
+        "report": report,
+    }
 
 
 def update_price_by_product(product_name: str, variant_name: str, new_price, compare_price=None):

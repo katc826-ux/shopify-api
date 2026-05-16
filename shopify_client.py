@@ -4,6 +4,7 @@ import smtplib
 import time
 from collections import defaultdict
 from datetime import date, datetime, time as dt_time, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from email.message import EmailMessage
 
 import requests
@@ -112,6 +113,31 @@ def shopify_graphql(query: str, variables=None):
         raise Exception(f"GraphQL errors: {data['errors']}")
 
     return data["data"]
+
+
+def _money_amount(money_set) -> Decimal:
+    try:
+        amount = ((money_set or {}).get("shopMoney") or {}).get("amount")
+        return Decimal(str(amount or "0"))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def _money_currency(money_set) -> str:
+    return ((money_set or {}).get("shopMoney") or {}).get("currencyCode") or ""
+
+
+def _format_money_amount(amount: Decimal) -> str:
+    return str(amount.quantize(Decimal("0.01")))
+
+
+def _normalize_order_number(order_number) -> str:
+    value = str(order_number or "").strip()
+    if not value:
+        return ""
+    if value.startswith("#"):
+        return value
+    return f"#{value}"
 
 
 def search_products(product_name: str, limit_products: int = 15, limit_variants: int = 15):
@@ -455,6 +481,158 @@ def get_top_selling_products(days: int = 7, limit: int = 5):
     top_items = sorted(sales.items(), key=lambda x: x[1], reverse=True)[:limit]
 
     return [{"product": name, "units_sold": qty} for name, qty in top_items]
+
+
+def get_sold_products_by_order_numbers(order_numbers):
+    normalized_order_numbers = []
+    seen = set()
+
+    for order_number in order_numbers or []:
+        normalized = _normalize_order_number(order_number)
+        if normalized and normalized not in seen:
+            normalized_order_numbers.append(normalized)
+            seen.add(normalized)
+
+    if not normalized_order_numbers:
+        raise ValueError("order_numbers must include at least one order number")
+
+    query = """
+    query SoldProductsForOrders($search: String!, $cursor: String) {
+      orders(first: 100, after: $cursor, query: $search, sortKey: CREATED_AT, reverse: true) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            id
+            name
+            createdAt
+            displayFinancialStatus
+            lineItems(first: 100) {
+              edges {
+                node {
+                  id
+                  name
+                  title
+                  sku
+                  quantity
+                  currentQuantity
+                  discountedUnitPriceSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                  discountedTotalSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                  taxLines {
+                    priceSet {
+                      shopMoney {
+                        amount
+                        currencyCode
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    search_query = " OR ".join(f"name:{order_number}" for order_number in normalized_order_numbers)
+    cursor = None
+    orders_by_name = {}
+
+    while True:
+        data = shopify_graphql(query, {"search": search_query, "cursor": cursor})
+        orders = data["orders"]
+
+        for order_edge in orders["edges"]:
+            order = order_edge["node"]
+            if order["name"] not in seen:
+                continue
+
+            line_items = []
+            for item_edge in order["lineItems"]["edges"]:
+                item = item_edge["node"]
+                quantity = int(item.get("quantity") or 0)
+                current_quantity = int(item.get("currentQuantity") or 0)
+                refunded_quantity = max(quantity - current_quantity, 0)
+                subtotal = _money_amount(item.get("discountedTotalSet"))
+                tax_total = sum(
+                    _money_amount(tax_line.get("priceSet"))
+                    for tax_line in item.get("taxLines", [])
+                )
+                total_after_tax = subtotal + tax_total
+                unit_price_set = item.get("discountedUnitPriceSet")
+                currency = (
+                    _money_currency(item.get("discountedTotalSet"))
+                    or _money_currency(unit_price_set)
+                    or "CAD"
+                )
+
+                if refunded_quantity == 0:
+                    refund_status = "not_refunded"
+                elif current_quantity == 0:
+                    refund_status = "refunded"
+                else:
+                    refund_status = "partially_refunded"
+
+                line_items.append(
+                    {
+                        "product_title": item.get("title") or item.get("name") or "",
+                        "line_item_name": item.get("name") or "",
+                        "sku": item.get("sku") or "",
+                        "quantity_ordered": quantity,
+                        "quantity_current": current_quantity,
+                        "quantity_refunded": refunded_quantity,
+                        "unit_price": _format_money_amount(_money_amount(unit_price_set)),
+                        "total_before_tax": _format_money_amount(subtotal),
+                        "tax_total": _format_money_amount(tax_total),
+                        "total_after_tax": _format_money_amount(total_after_tax),
+                        "currency": currency,
+                        "refund_status": refund_status,
+                        "refunded": refunded_quantity > 0,
+                    }
+                )
+
+            orders_by_name[order["name"]] = {
+                "order_number": order["name"],
+                "order_id": order["id"],
+                "created_at": order["createdAt"],
+                "financial_status": order.get("displayFinancialStatus"),
+                "line_items": line_items,
+            }
+
+        if not orders["pageInfo"]["hasNextPage"]:
+            break
+        cursor = orders["pageInfo"]["endCursor"]
+
+    found_orders = [
+        orders_by_name[order_number]
+        for order_number in normalized_order_numbers
+        if order_number in orders_by_name
+    ]
+    missing_orders = [
+        order_number
+        for order_number in normalized_order_numbers
+        if order_number not in orders_by_name
+    ]
+
+    return {
+        "requested_order_numbers": normalized_order_numbers,
+        "found_order_count": len(found_orders),
+        "missing_order_numbers": missing_orders,
+        "orders": found_orders,
+    }
 
 
 def _is_dji_consumer_product(product_title: str, sku: str = "") -> bool:

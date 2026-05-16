@@ -9,6 +9,7 @@ from shopify_client import (
     get_top_selling_products,
     update_price_by_product,
     get_weekly_dji_consumer_sales_report,
+    get_sold_products_by_order_numbers,
 )
 from db import (
     init_db,
@@ -116,6 +117,22 @@ def top_selling():
 
         results = get_top_selling_products(days=days, limit=5)
         return jsonify(results)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/orders/sold_products", methods=["POST"])
+def sold_products_by_orders():
+    try:
+        body = request.get_json() or {}
+        order_numbers = body.get("order_numbers")
+
+        if not isinstance(order_numbers, list):
+            return jsonify({"error": "order_numbers must be a list"}), 400
+
+        return jsonify(get_sold_products_by_order_numbers(order_numbers))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

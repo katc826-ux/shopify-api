@@ -1,6 +1,22 @@
 # shopify-api
 API call to Shopify to track store inventory and top selling items
 
+## Sold products by order number
+
+Use this endpoint when a custom GPT has one or more Shopify order numbers and needs
+the products sold on those orders:
+
+`POST /orders/sold_products`
+
+```json
+{
+  "order_numbers": ["#1001", "1002"]
+}
+```
+
+The response includes product title, quantity, unit price, total before tax,
+tax total, total after tax, currency, and whether each item was refunded.
+
 ## Weekly DJI consumer sales report
 
 This project now includes a weekly DJI consumer sales report that returns:

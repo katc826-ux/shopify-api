@@ -131,6 +131,21 @@ def _format_money_amount(amount: Decimal) -> str:
     return str(amount.quantize(Decimal("0.01")))
 
 
+def _money_cents(amount) -> int:
+    return int(Decimal(str(amount or "0")).quantize(Decimal("0.01")) * 100)
+
+
+def _parse_shopify_datetime(value: str) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _normalize_order_number(order_number) -> str:
     value = str(order_number or "").strip()
     if not value:
@@ -827,6 +842,240 @@ def get_weekly_dji_consumer_sales_report(days: int = 7, start_date: str = None, 
         },
         "rows": rows,
         "markdown_table": _format_markdown_table(rows),
+    }
+
+
+def _promotion_matches_line_item(promo, item, order_created_at: datetime) -> bool:
+    promo_start = _parse_shopify_datetime(promo["start_at"])
+    promo_end = _parse_shopify_datetime(promo["end_at"])
+
+    if not (promo_start <= order_created_at <= promo_end):
+        return False
+
+    promo_sku = normalize_text(promo.get("sku") or "")
+    item_sku = normalize_text(item.get("sku") or "")
+    variant = item.get("variant") or {}
+    variant_sku = normalize_text(variant.get("sku") or "")
+
+    if promo_sku:
+        return promo_sku in {item_sku, variant_sku}
+
+    promo_product_title = normalize_text(promo.get("product_title") or "")
+    item_product_title = normalize_text(item.get("title") or "")
+    variant_product_title = normalize_text(((variant.get("product") or {}).get("title")) or "")
+
+    if promo_product_title not in {item_product_title, variant_product_title}:
+        return False
+
+    promo_variant_title = normalize_text(promo.get("variant_title") or "")
+    if not promo_variant_title:
+        return True
+
+    item_name = normalize_text(item.get("name") or "")
+    variant_title = normalize_text(variant.get("title") or "")
+    return promo_variant_title in {variant_title, item_name} or promo_variant_title in item_name
+
+
+def get_promotion_sales_report(
+    promotions,
+    start_date: str,
+    end_date: str,
+    require_price_match: bool = True,
+):
+    report_range = _resolve_report_range(start_date=start_date, end_date=end_date)
+    start_at = report_range["start_at"]
+    end_at = report_range["end_at"]
+
+    if not promotions:
+        return {
+            "report_name": "promotion_sales",
+            "start_date": report_range["start_date"],
+            "end_date": report_range["end_date"],
+            "promotion_count": 0,
+            "matched_line_item_count": 0,
+            "matched_order_count": 0,
+            "quantity_sold": 0,
+            "total_before_tax": "0.00",
+            "currency": "CAD",
+            "orders": [],
+            "rows": [],
+        }
+
+    query = """
+    query PromotionSales($search: String!, $cursor: String) {
+      orders(first: 100, after: $cursor, query: $search, sortKey: CREATED_AT, reverse: true) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            id
+            name
+            createdAt
+            displayFinancialStatus
+            lineItems(first: 100) {
+              edges {
+                node {
+                  id
+                  name
+                  title
+                  sku
+                  quantity
+                  currentQuantity
+                  discountedUnitPriceSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                  discountedTotalSet {
+                    shopMoney {
+                      amount
+                      currencyCode
+                    }
+                  }
+                  taxLines {
+                    priceSet {
+                      shopMoney {
+                        amount
+                        currencyCode
+                      }
+                    }
+                  }
+                  variant {
+                    id
+                    title
+                    sku
+                    product {
+                      title
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    search_query = f"created_at:>={start_at.strftime('%Y-%m-%d')} created_at:<={end_at.strftime('%Y-%m-%d')}"
+    cursor = None
+    rows = []
+    orders_by_number = {}
+    total_before_tax = Decimal("0")
+    total_quantity = 0
+    currency = "CAD"
+
+    while True:
+        data = shopify_graphql(query, {"search": search_query, "cursor": cursor})
+        orders = data["orders"]
+
+        for order_edge in orders["edges"]:
+            order = order_edge["node"]
+            order_created_at = _parse_shopify_datetime(order["createdAt"])
+
+            for item_edge in order["lineItems"]["edges"]:
+                item = item_edge["node"]
+                unit_price = _money_amount(item.get("discountedUnitPriceSet"))
+                matching_promos = [
+                    promo
+                    for promo in promotions
+                    if _promotion_matches_line_item(promo, item, order_created_at)
+                ]
+
+                if require_price_match:
+                    matching_promos = [
+                        promo
+                        for promo in matching_promos
+                        if _money_cents(promo["promo_price"]) == _money_cents(unit_price)
+                    ]
+
+                if not matching_promos:
+                    continue
+
+                promo = matching_promos[0]
+                quantity = int(item.get("quantity") or 0)
+                current_quantity = int(item.get("currentQuantity") or 0)
+                refunded_quantity = max(quantity - current_quantity, 0)
+                subtotal = _money_amount(item.get("discountedTotalSet"))
+                tax_total = sum(
+                    _money_amount(tax_line.get("priceSet"))
+                    for tax_line in item.get("taxLines", [])
+                )
+                line_currency = (
+                    _money_currency(item.get("discountedTotalSet"))
+                    or _money_currency(item.get("discountedUnitPriceSet"))
+                    or currency
+                )
+                currency = line_currency or currency
+                total_before_tax += subtotal
+                total_quantity += current_quantity
+
+                if refunded_quantity == 0:
+                    refund_status = "not_refunded"
+                elif current_quantity == 0:
+                    refund_status = "refunded"
+                else:
+                    refund_status = "partially_refunded"
+
+                row = {
+                    "order_number": order["name"],
+                    "order_id": order["id"],
+                    "order_created_at": order["createdAt"],
+                    "financial_status": order.get("displayFinancialStatus"),
+                    "promotion_id": promo["id"],
+                    "promotion_name": promo.get("promotion_name") or "",
+                    "promotion_type": promo.get("promotion_type") or "scheduled",
+                    "promotion_start_at": str(promo["start_at"]),
+                    "promotion_end_at": str(promo["end_at"]),
+                    "product_title": item.get("title") or item.get("name") or "",
+                    "line_item_name": item.get("name") or "",
+                    "sku": item.get("sku") or ((item.get("variant") or {}).get("sku")) or "",
+                    "variant_title": ((item.get("variant") or {}).get("title")) or "",
+                    "quantity_ordered": quantity,
+                    "quantity_current": current_quantity,
+                    "quantity_refunded": refunded_quantity,
+                    "unit_price": _format_money_amount(unit_price),
+                    "regular_price": _format_money_amount(Decimal(str(promo["regular_price"]))),
+                    "promo_price": _format_money_amount(Decimal(str(promo["promo_price"]))),
+                    "total_before_tax": _format_money_amount(subtotal),
+                    "tax_total": _format_money_amount(tax_total),
+                    "total_after_tax": _format_money_amount(subtotal + tax_total),
+                    "currency": line_currency,
+                    "refund_status": refund_status,
+                    "refunded": refunded_quantity > 0,
+                }
+                rows.append(row)
+                orders_by_number.setdefault(
+                    order["name"],
+                    {
+                        "order_number": order["name"],
+                        "order_id": order["id"],
+                        "created_at": order["createdAt"],
+                        "financial_status": order.get("displayFinancialStatus"),
+                        "line_items": [],
+                    },
+                )
+                orders_by_number[order["name"]]["line_items"].append(row)
+
+        if not orders["pageInfo"]["hasNextPage"]:
+            break
+        cursor = orders["pageInfo"]["endCursor"]
+
+    return {
+        "report_name": "promotion_sales",
+        "start_date": report_range["start_date"],
+        "end_date": report_range["end_date"],
+        "promotion_count": len(promotions),
+        "matched_line_item_count": len(rows),
+        "matched_order_count": len(orders_by_number),
+        "quantity_sold": total_quantity,
+        "total_before_tax": _format_money_amount(total_before_tax),
+        "currency": currency,
+        "orders": list(orders_by_number.values()),
+        "rows": rows,
     }
 
 
